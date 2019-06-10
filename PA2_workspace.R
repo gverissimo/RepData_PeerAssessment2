@@ -8,6 +8,7 @@ library(lubridate)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
+library(purrr)
 
 ## *** TITLE ***
 ## Your document should have a title that briefly summarizes your data analysis
