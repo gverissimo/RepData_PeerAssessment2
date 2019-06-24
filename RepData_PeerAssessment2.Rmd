@@ -1,0 +1,465 @@
+---
+title: 'Reproducible Research: Peer Assessment 2'
+subtitle: 'Health and Economic Impact of Severe Weather in the US, 1996-2011'
+author: "Greg Verissimo"
+output:
+  html_document:
+    toc: false
+    number_sections: true
+---
+
+
+________________________________ 
+# Synopsis  
+
+This paper uses NOAA's [Storm Events Database](https://www.ncdc.noaa.gov/stormevents/details.jsp) to analyze the impact of severe weather events on the US and its territores, and more specifically to answer the following questions:
+
+1. Which types of severe weather events are the most harmful with respect to population health?  
+1. Which types of severe weather events have the greatest economic consequences?  
+
+In this paper we draw on 5 key variables from the _Storm Events Database_:
+
+i. **WFO** : The National Weather Service operates 122 weather forecast offices (WFO) across the US and its territores which issue severe weather warnings, gather weather observations, and daily and monthly climate data for their assigned areas.  
+i. **EVTYPE** : While there are only 55 official Event Types (see appendix), in actuality the database  contains nearly 1000 different types.  
+i. **BGN_DATE, BGN_TIME** : Beginning date and time of each storm event.  
+i. **PROPDMG, PROPDMGEXP** : Property damage resulting freom each storm event including damage to both private property as well as public infrastructure and facilities.  
+i. **CROPDMG, CROPDMGEXP** : Crop damage resulting from each storm event.  
+i. **INJURIES, FATALITIES** : Injuries and fatalities resulting from each storm event. 
+
+Source dataset :  
+
+* source : National Oceanic and Atmospheric Agency - National Climatic Data Center (NOAA/NCDC)  
+* link to datafile : https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2  
+* years : 1951 to 2011  
+* storm events : 907,297  
+* variables : 37  
+
+________________________________ 
+# Data Processing  
+
+## Load required packages  
+```{r, echo=TRUE, results="hide", message=FALSE, warning=FALSE}
+## Load  libraries
+library(R.utils)
+library(lubridate)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(RColorBrewer)
+```
+  
+## Download datasets from the Internet 
+```{r download_data_from_internet}
+## download and decompress raw data
+if (!file.exists("./data/repdata-data-StormData.csv.bz2")) {
+        download.file("https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2", 
+                      destfile = "./data/repdata-data-StormData.csv.bz2",
+                      method = "curl"
+                      )
+        bunzip2("./data/repdata-data-StormData.csv.bz2", "./data/repdata-data-StormData.csv", 
+                remove = FALSE, 
+                skip = TRUE
+                )
+}
+
+
+if (!file.exists("./data/NWS_WFO_ID.txt")) {
+        download.file("https://www.spc.noaa.gov/misc/NWS_WFO_ID.txt", 
+                      destfile = "./data/NWS_WFO_ID.txt",
+                      method = "curl"
+        )
+}
+```
+
+## Load WFO Information
+Import  NOAA/NWS WFO information into a datafram and do some some basic cleanup  
+*(e.g. - replace tabs with commas, remove extra spaces, etc.)*  
+```{r load_wfo_info}
+## import NWS Weather Forecast (WFO) data
+NwsInfoId_raw <- readLines("./data/NWS_WFO_ID.txt")    ## load WFO ID text file
+NwsInfoId_raw <- NwsInfoId_raw[-c(1:2)]                ## trim off first two title lines
+
+## clean NWS WFO info
+NwsInfoId_list <- NwsInfoId_raw %>%
+        gsub(pattern = "\t+", replace = ",") %>%
+        gsub(pattern = ", +", replace = ",") %>%
+        strsplit(",")
+## ...and convert to dataframe
+NwsInfoId <- as.data.frame( 
+        matrix(unlist(NwsInfoId_list), ncol=3, byrow=TRUE )
+        )
+names(NwsInfoId) = c("City", "State", "WFO")
+## print(NwsInfoId)  ## debug
+```
+
+## Load and Tidy Storm Incident Dataset  
+Import the NOAA/NCDC _Storm Events Database_ into dataframe then subset and tidy the dataset by merging date & time, crop damage & exponent, property damage & exponent, etc.  
+```{r load_and_tidy_storm_incident_dataset}
+## import storm incident dataset
+stormData_raw <- read.csv(file = "./data/repdata-data-StormData.csv", 
+                          sep = ",", 
+                          header=TRUE, 
+                          stringsAsFactors = FALSE
+                          )
+
+## first subset and tidy up the dataset
+stormData <- stormData_raw %>% 
+        ## subset the variables we'll be using for the analysis
+        select(WFO, EVTYPE, BGN_DATE, BGN_TIME, 
+               PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP, 
+               INJURIES, FATALITIES
+               ) %>%
+        
+        ## replace missing WFO with NA
+        mutate(
+                WFO = ifelse(WFO=="", NA_character_, WFO)
+        ) %>%
+
+        ## uppercase event types and rename the variable
+        mutate(EVTYPE = toupper(EVTYPE)) %>%
+        rename(EventType = EVTYPE) %>%
+        
+        ## clean up event start date and combine date & time into a single variable
+        separate(BGN_DATE, c("BGN_DATE", NA), sep="[ ]") %>%  ## discard dangling "0:00:00"
+        ## combine date/time strings and convert to date
+        mutate(
+                EventStart = paste(BGN_DATE, " ", 
+                                   substr(BGN_TIME,1,2), ":", 
+                                   substr(BGN_TIME,3,4),":00", 
+                                   sep=""),
+                EventStart = mdy_hms(EventStart)
+        ) %>%
+        ## ...drop the old variables
+        select(-c(BGN_DATE, BGN_TIME)) %>%
+        
+        ## combine (PROPDMGePROPDMGEXP and CROPDMGeCROPDMGEXP) into numbers
+        mutate(
+                PropertyDamage = PROPDMG*recode(toupper(PROPDMGEXP), 
+                                      "H"=10^2, "K"=10^3, "M"=10^6, "B"=10^9, 
+                                      "0"=1, "1"=10, "2"=10^2, "3"=10^3, "4"=10^4, "5"=10^5, 
+                                      "6"=10^6, "7"=10^7, "8"=10^8, 
+                                      "+"=1, "-"=1, .default=NA_real_),
+                CropDamage = CROPDMG*recode(toupper(CROPDMGEXP), 
+                                      "H"=10^2, "K"=10^3, "M"=10^6, "B"=10^9, 
+                                      "0"=1, "1"=10, "2"=10^2, "3"=10^3, "4"=10^4, "5"=10^5, 
+                                      "6"=10^6, "7"=10^7, "8"=10^8, 
+                                      "+"=1, "-"=1, .default=NA_real_),
+                ## for later ordering, sum propertyDamage + cropDamage
+                PropertyAndCropDamage = ifelse(!is.na(PropertyDamage), PropertyDamage, 0) + 
+                        ifelse(!is.na(CropDamage), CropDamage, 0),
+                
+        ) %>%
+        ## ...and drop the old variables
+        select(-c(PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)) %>%
+        
+        ## similarly combine fatalities and inturies into fatalitiesAndInjuries
+        mutate(
+                FatalitiesAndInjuries = ifelse(!is.na(FATALITIES), FATALITIES, 0) + 
+                        ifelse(!is.na(INJURIES), INJURIES, 0)
+        ) %>%
+        ## and rename injuries & fatalities ...just cuz I dislike allcaps
+        rename(Injuries = INJURIES) %>%
+        rename(Fatalities = FATALITIES)
+## summary(stormData$PropertyAndCropDamage)  ## debug
+## summary(stormData$FatalitiesAndInjuries)  ## debug
+```
+
+## Consolidate Event Classifications  
+Across the 900,000+ events contained in the dataset, there are nearly 1000 unique weather event classifications --including quite a few data entry errors. 
+
+In order to get a high level view of the impacts across the various categories of severre weather events, we chose to consolidate those 900+ event classificaitons into just 20 broad categories:  
+
+1. Cold  
+1. Heat  
+1. Drought  
+1. Dust  
+1. Fire / Smoke  
+1. Water / Flood  
+1. Hurricane / Tropical Storm  
+1. Thunder / Lightning  
+1. Tornado / Waterspout  
+1. Rain  
+1. Snow / Ice  
+1. High Surf / Tide  
+1. Earthquake / Tsunami  
+1. Avalanche  
+1. High Winds  
+1. Erosion / Landslide  
+1. Fog  
+1. Dam Failure  
+1. Volcano  
+1. _other_  
+```{r consolidate_events}
+## Consolidate and clean storm event descriptions
+stormData <- stormData %>% 
+        mutate(EventType = case_when(
+                grepl("COLD|WINDCHILL|COOL|WINTER WEATHER", EventType) ~ "Cold",
+                grepl("HEAT|WARM|HOT|DRY", EventType) ~ "Heat",
+                grepl("DROUGHT|DRY|LOW RAINFALL", EventType) ~ "Drought",
+                grepl("DUST", EventType) ~ "Dust",
+                grepl("FIRE|SMOKE", EventType) ~ "Fire / Smoke",
+                grepl("FLOOD|FLD|FLDG|FLOOOD|SURGE|HIGH WATER|SEICHE", EventType) ~ "Water / Flood",
+                grepl("HURRICANE|CYCLONE|TYPHOON|TROPICAL STORM|TROPICAL DEPRESSION", EventType) ~  "Hurricane / Tropical Storm",
+                grepl("TSTM|THUNDERSTORM|LIGHTNING|LIGHTING|LIGNTNING", EventType) ~ "Thunder / Lightning",
+                grepl("TORNADO|TORNDAO|FUNNEL|GUSTNADO|WATERSPOUT", EventType) ~ "Tornado / Waterspout",
+                grepl("RAIN|SHOWER|WET|DOWNBURST|PRECIPITATION|HEAVY MIX", EventType) ~ "Rain",
+                grepl("SNOW|BLIZZARD|AVALANCHE|AVALANCE|ICE|ICY|FROST|FREEZE|FREEZING|GLAZE|HAIL|SLEET|FREEZING RAIN|WINTER STORM", EventType) ~ "Snow / Ice",
+                grepl("SURF|CURRENT|TIDE|TIDAL FLOOD|COASTAL|FLOOD", EventType) ~ "High Surf / Tide",
+                grepl("EARETHQUAKE|TSUNAMI", EventType) ~ "Earthquake / Tsunami",
+                grepl("AVALANCHE|AVALANCE", EventType) ~ "Avalanche",
+                grepl("WIND|MICROBURST", EventType) ~ "High Winds",
+                ## lower priority classifications
+                grepl("EROSION|EROSIN|SLIDE|SLUMP", EventType) ~ "Erosion / Landslide",
+                grepl("FOG", EventType) ~ "Fog",
+                grepl("DAM", EventType) ~ "Dam Failure",
+                grepl("VOLCANO|VOLCANIC", EventType) ~ "Volcano",
+                is.na(EventType) ~ NA_character_,
+                TRUE ~ "<other>"
+                )
+        )
+```
+
+## Select Years for Analysis  
+In the early years of the dataset, very few severe weather events were captured. For example in 1951, the first full year of the dataset, there were less than 250 recorded events. Ten years later there were still only about 2,000 recorded events. In contrast, during the last year of the dataset (2011) there were more than 60,000 recorded events.  
+
+Based on a quick analysis (below), we chose to target the years after 1996 when there was a significant jump to more than 30,000 severe weather events recorded each year.  
+```{r plot_events_per_year}
+## assess which years to utilize for the analysis
+stormDates <- data.frame(EventStart=stormData$EventStart)
+stormDates <-stormDates %>% 
+        group_by(year=floor_date(EventStart, "year")) %>%
+        summarize(counts=n())
+plot(stormDates)
+```
+
+Identify first target year (≥30,000 events) and subset the dataset (≥1996).  
+```{r subset_years_of_interest}
+## looking at the plot, e see what appears to be an exponential curve but with significant
+## jump above 30k events per year starting in the late 1990's -- specifically: 1996
+## specifically:
+stormDates %>% 
+        filter(counts>=30000) %>%
+        head(n=1)
+
+## and filter stormData
+targetStormData <- stormData %>% filter(EventStart >= as_date("1996-01-01 00:00:00"))
+```
+________________________________ 
+# Results  
+
+## Health Impact of Severe Weather Events  
+As you can see in the following chart, while the greatest number of deaths occur during periods of extreme heat, by a large margin the greatest health toll are due to tornadoes / waterspouts -- more thn thunderstorms and floods combined.
+```{r analysis_health_impact}
+healthImpact <- targetStormData %>% 
+        select(EventType, Injuries, Fatalities, FatalitiesAndInjuries) %>%
+        group_by(EventType) %>% 
+        summarise(
+                TotalInjuries = sum(Injuries, na.rm = TRUE), 
+                TotalFatalities = sum(Fatalities, na.rm = TRUE),
+                TotalFatalitiesAndInjuries = TotalInjuries + TotalFatalities
+        ) %>%
+        arrange(desc(TotalFatalitiesAndInjuries)) %>%
+        head(10) ## %>% print()
+
+healthImpact %>%
+        ## for sorting the bars, convert eventType to factors
+        mutate(EventType = factor(EventType, levels = EventType[order(-TotalFatalitiesAndInjuries)])) %>%
+        ## reshape data to long form for plotting
+        gather(Type, HealthImpact, TotalInjuries:TotalFatalities) %>%
+        ## and plot
+        ggplot(aes(fill=Type, y=HealthImpact, x=EventType)) + 
+        geom_bar( stat="identity") + 
+        scale_fill_brewer(palette="Set1") + 
+        labs(y = "Health Impact (injuries & fatalities)") +
+        theme(axis.text.x=element_text(angle=90, hjust=0.95, vjust = 0.2),
+              axis.title.x = element_blank(),
+        )
+```
+
+## Economic Impact of Severe Weather Events  
+As you can see in the following chart, the greatest economic toll is due to water/flooding --more than all other categories combined. 
+```{r analysis_economic_impact}
+## summarize economic impact
+economicImpact <- targetStormData %>% 
+        select(EventType, PropertyDamage, CropDamage, PropertyAndCropDamage) %>%
+        group_by(EventType) %>% 
+        summarise(
+                TotalPropertyDamage = sum(PropertyDamage, na.rm = TRUE)/10^9, 
+                TotalCropDamage = sum(CropDamage, na.rm = TRUE)/10^9,
+                TotalPropertyAndCropDamage = TotalPropertyDamage + TotalCropDamage
+                ) %>%
+        arrange(desc(TotalPropertyAndCropDamage)) %>%
+        head(10) ## %>% print()
+
+economicImpact %>%
+        ## for sorting the bars, convert eventType to factors
+        mutate(EventType = factor(EventType, levels = EventType[order(-TotalPropertyAndCropDamage)])) %>%
+        ## reshape data to long form for plotting
+        gather(Type, Damage, TotalPropertyDamage:TotalCropDamage) %>%
+        ## and plot
+        ggplot(aes(fill=Type, y=Damage, x=EventType)) + 
+        geom_bar( stat="identity") + 
+        scale_fill_brewer(palette="Set1") + 
+        labs(y = "Economic Impact (in billions)") +
+        theme(axis.text.x=element_text(angle=90, hjust=0.95, vjust = 0.2),
+              axis.title.x = element_blank(),
+              )
+```
+
+________________________________ 
+# Conclusion  
+
+Across the United States and its territories:
+
+1. By a wide margin, Tornadoes have the greatest health impact in terms of injuries and fatalities.
+1. By an even wider margin, the greatest economic toll is inflicted by water/flooding.
+
+________________________________ 
+# Appendices
+
+## List of Official Severe Weather Types
+
+|  |  |  |  |
+|--------|--------|--------|--------|--------|--------|  
+|Astronomical Low Tide | Excessive Heat | High Surf | Marine Hurricane/Typhoon | Strong Wind|
+|Avalanche | Extreme Cold/Wind Chill | High Wind | Marine Lightning | Thunderstorm Wind|
+|Blizzard | Flash Flood | Hurricane (Typhoon) | Marine Strong Wind | Tornado|
+|Coastal Flood | Flood | Ice Storm | Marine Thunderstorm Wind | Tropical Depression|
+|Cold/Wind Chill | Frost/Freeze | Lake-Effect Snow | Marine Tropical Depression | Tropical Storm|
+|Debris Flow | Funnel Cloud | Lakeshore Flood | Marine Tropical Storm | Tsunami|
+|Dense Fog | Freezing Fog | Lightning | Rip Current | Volcanic Ash|
+|Dense Smoke | Hail | Marine Dense Fog | Seiche | Waterspout|
+|Drought | Heat | Marine Hail | Sleet | Wildfire|
+|Dust Devil | Heavy Rain | Marine Heavy Freezing Spray | Sneaker Wave | Winter Storm|
+|Dust Storm | Heavy Snow | Marine High Wind | Storm Surge/Tide | Winter Weather|
+
+
+## List of Weather Forecast Offices (WFO)
+
+|  |  |  |
+|--------|--------|--------|  
+|Albuquerque | NM | ABQ|
+|Aberdeen | SD | ABR|
+|Anchorage | AK | AFC|
+|Fairbanks | AK | AFG|
+|Juneau | AK | AJK|
+|Wakefield | VA | AKQ|
+|Albany | NY | ALY|
+|Amarillo | TX | AMA|
+|Anchorage | AK | ANC|
+|Gaylord | MI | APX|
+|La Crosse | WI | ARX|
+|Binghamton | NY | BGM|
+|Bismarck | ND | BIS|
+|Birmingham | AL | BMX|
+|Boise | ID | BOI|
+|Denver/Boulder | CO | BOU|
+|Boston | MA | BOX|
+|Brownsville | TX | BRO|
+|Burlington | VT | BTV|
+|Buffalo | NY | BUF|
+|Billings | MT | BYZ|
+|Columbia | SC | CAE|
+|Caribou | ME | CAR|
+|Charleston | SC | CHS|
+|Cleveland | OH | CLE|
+|Corpus Christi | TX | CRP|
+|State College | PA | CTP|
+|Cheyenne | WY | CYS|
+|Dodge City | KS | DDC|
+|Duluth | MN | DLH|
+|Des Moines | IA | DMX|
+|Detroit | MI | DTX|
+|Quad Cities | IA | DVN|
+|Kansas City | MO | EAX|
+|Eureka | CA | EKA|
+|El Paso | TX | EPZ|
+|Austin/San Antonio | TX | EWX|
+|Key West | FL | EYW|
+|Atlanta | GA | FFC|
+|Grand Forks | ND | FGF|
+|Flagstaff | AZ | FGZ|
+|Sioux Falls | SD | FSD|
+|Dallas/Fort Worth | TX | FWD|
+|Glasgow | MT | GGW|
+|Hastings | NE | GID|
+|Grand Junction | CO | GJT|
+|Goodland | KS | GLD|
+|Green Bay | WI | GRB|
+|Grand Rapids | MI | GRR|
+|Greer | SC | GSP|
+|Guam | GU | GUM|
+|Gray | ME | GYX|
+|Honolulu | HI | HFO|
+|Houston | TX | HGX|
+|Hanford | CA | HNX|
+|Huntsville | AL | HUN|
+|Wichita | KS | ICT|
+|Wilmington | NC | ILM|
+|Wilmington | OH | ILN|
+|Lincoln | IL | ILX|
+|Indianapolis | IN | IND|
+|Nrn. Indiana | IN | IWX|
+|Jackson | MS | JAN|
+|Jacksonville | FL | JAX|
+|Jackson | KY | JKL|
+|North Platte | NE | LBF|
+|Lake Charles | LA | LCH|
+|New Orleans | LA | LIX|
+|Elko | NV | LKN|
+|Louisville | KY | LMK|
+|Chicago | IL | LOT|
+|Los Angeles | CA | LOX|
+|St. Louis | MO | LSX|
+|Lubbock | TX | LUB|
+|Sterling | VA | LWX|
+|Little Rock | AR | LZK|
+|Midland/Odessa | TX | MAF|
+|Memphis | TN | MEG|
+|Miami | FL | MFL|
+|Medford | OR | MFR|
+|Morehead City | NC | MHX|
+|Milwaukee | WI | MKX|
+|Melbourne | FL | MLB|
+|Mobile | AL | MOB|
+|Twin Cities | MN | MPX|
+|Marquette | MI | MQT|
+|Morristown | TN | MRX|
+|Missoula | MT | MSO|
+|San Francisco | CA | MTR|
+|Omaha | NE | OAX|
+|Nashville | TN | OHX|
+|New York City | NY | OKX|
+|Spokane | WA | OTX|
+|Norman | OK | OUN|
+|Paducah | KY | PAH|
+|Pittsburgh | PA | PBZ|
+|Pendleton | OR | PDT|
+|Mount Holly | NJ | PHI|
+|Pocatello | ID | PIH|
+|Portland | OR | PQR|
+|Phoenix | AZ | PSR|
+|Pueblo | CO | PUB|
+|Raleigh | NC | RAH|
+|Reno | NV | REV|
+|Riverton | WY | RIW|
+|Charleston | WV | RLX|
+|Blacksburg | VA | RNK|
+|Seattle | WA | SEW|
+|Springfield | MO | SGF|
+|San Diego | CA | SGX|
+|Shreveport | LA | SHV|
+|San Angelo | TX | SJT|
+|San Juan | PR | SJU|
+|Salt Lake City | UT | SLC|
+|Sacramento | CA | STO|
+|Tallahassee | FL | TAE|
+|Tampa Bay Area | FL | TBW|
+|Great Falls | MT | TFX|
+|Topeka | KS | TOP|
+|Tulsa | OK | TSA|
+|Tucson | AZ | TWC|
+|Rapid City | SD | UNR|
+|Las Vegas | NV | VEF|
+
+

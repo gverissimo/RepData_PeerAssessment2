@@ -8,7 +8,8 @@ library(lubridate)
 library(dplyr)
 library(tidyr)
 library(ggplot2)
-library(purrr)
+library(RColorBrewer)
+##library(purrr)
 
 ## *** TITLE ***
 ## Your document should have a title that briefly summarizes your data analysis
@@ -47,7 +48,6 @@ if (!file.exists("./data/NWS_WFO_ID.txt")) {
 
 
 ## import NWS Weather Forecast (WFO) data
-
 NwsInfoId_raw <- readLines("./data/NWS_WFO_ID.txt")    ## load WFO ID text file
 NwsInfoId_raw <- NwsInfoId_raw[-c(1:2)]                ## trim off first two title lines
 
@@ -56,28 +56,197 @@ NwsInfoId_list <- NwsInfoId_raw %>%
         gsub(pattern = "\t+", replace = ",") %>%
         gsub(pattern = ", +", replace = ",") %>%
         strsplit(",")
-## convert to dataframe
+## ...and convert to dataframe
 NwsInfoId <- as.data.frame( 
         matrix(unlist(NwsInfoId_list), ncol=3, byrow=TRUE )
         )
-names(NwsInfoId) = c("CITY", "STATE", "WFO")
-print(NwsInfoId)
+names(NwsInfoId) = c("City", "State", "WFO")
+print(NwsInfoId)  ## debug
 
-## import storm incident data
+## import storm incident dataset
 stormData_raw <- read.csv(file = "./data/repdata-data-StormData.csv", 
                           sep = ",", 
                           header=TRUE, 
                           stringsAsFactors = FALSE
-)
-## clean storm incident data
-stormData <- stormData_raw
+                          )
+
+## first subset and tidy up the data
+stormData <- stormData_raw %>% 
+        ## subset the variables we'll be using for the analysis
+        select(WFO, EVTYPE, BGN_DATE, BGN_TIME, 
+               PROPDMG, PROPDMGEXP, 
+               CROPDMG, CROPDMGEXP, 
+               INJURIES, FATALITIES
+               ) %>%
+        
+        ## replace missing WFO with NA
+        mutate(
+                WFO = ifelse(WFO=="", NA_character_, WFO)
+        ) %>%
+
+        ## uppercase event types and rename the variable
+        mutate(EVTYPE = toupper(EVTYPE)) %>%
+        rename(EventType = EVTYPE) %>%
+        
+        ## clean up event start date and combine date & time into a single variable
+        separate(BGN_DATE, c("BGN_DATE", NA), sep="[ ]") %>%  ## discard dangling "0:00:00"
+        mutate(
+                ## combine date/time
+                EventStart = paste(BGN_DATE, " ", substr(BGN_TIME,1,2), ":", substr(BGN_TIME,3,4),":00", sep=""),
+                EventStart = mdy_hms(EventStart)
+        ) %>%
+        ## ...and drop the old variables
+        select(-c(BGN_DATE, BGN_TIME)) %>%
+        
+        ## combine (PROPDMG+PROPDMGEXP and CROPDMG+CROPDMGEXP) into numbers
+        mutate(
+                PropertyDamage = PROPDMG*recode(toupper(PROPDMGEXP), 
+                                                "H"=10^2, "K"=10^3, "M"=10^6, "B"=10^9, 
+                                                "0"=1, "1"=10, "2"=10^2, "3"=10^3, "4"=10^4, "5"=10^5, 
+                                                "6"=10^6, "7"=10^7, "8"=10^8, 
+                                                "+"=1, "-"=1, .default=NA_real_),
+                CropDamage = CROPDMG*recode(toupper(CROPDMGEXP), 
+                                            "H"=10^2, "K"=10^3, "M"=10^6, "B"=10^9, 
+                                            "0"=1, "1"=10, "2"=10^2, "3"=10^3, "4"=10^4, "5"=10^5, 
+                                            "6"=10^6, "7"=10^7, "8"=10^8, 
+                                            "+"=1, "-"=1, .default=NA_real_),
+                ## for later ordering, sum propertyDamage + cropDamage
+                PropertyAndCropDamage = ifelse(!is.na(PropertyDamage), PropertyDamage, 0) + 
+                        ifelse(!is.na(CropDamage), CropDamage, 0),
+                
+        ) %>%
+        ## ...and drop the old variables
+        select(-c(PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)) %>%
+        
+        ## similarly combine fatalities and inturies into fatalitiesAndInjuries
+        ## and rename injuries & fatalities ...just cuz I dislike allcaps
+        mutate(
+                FatalitiesAndInjuries = ifelse(!is.na(FATALITIES), FATALITIES, 0) + 
+                        ifelse(!is.na(INJURIES), INJURIES, 0)
+        ) %>%
+        rename(Injuries = INJURIES) %>%
+        rename(Fatalities = FATALITIES)
+
+summary(stormData$PropertyAndCropDamage)  ## debug
+summary(stormData$FatalitiesAndInjuries)  ## debug
+
+## Consolidate and clean storm event descriptions
+stormData <- stormData %>% 
+        mutate(EventType = case_when(
+                grepl("COLD|WINDCHILL|COOL|WINTER WEATHER", EventType) ~ "Cold",
+                grepl("HEAT|WARM|HOT|DRY", EventType) ~ "Heat",
+                grepl("DROUGHT|DRY|LOW RAINFALL", EventType) ~ "Drought",
+                grepl("DUST", EventType) ~ "Dust",
+                grepl("FIRE|SMOKE", EventType) ~ "Fire / Smoke",
+                grepl("FLOOD|FLD|FLDG|FLOOOD|SURGE|HIGH WATER|SEICHE", EventType) ~ "Water / Flood",
+                grepl("HURRICANE|CYCLONE|TYPHOON|TROPICAL STORM|TROPICAL DEPRESSION", EventType) ~  "Hurricane / Tropical Storm",
+                grepl("TSTM|THUNDERSTORM|LIGHTNING|LIGHTING|LIGNTNING", EventType) ~ "Thunder / Lightning",
+                grepl("TORNADO|TORNDAO|FUNNEL|GUSTNADO|WATERSPOUT", EventType) ~ "Tornado / Waterspout",
+                grepl("RAIN|SHOWER|WET|DOWNBURST|PRECIPITATION|HEAVY MIX", EventType) ~ "Rain",
+                grepl("SNOW|BLIZZARD|AVALANCHE|AVALANCE|ICE|ICY|FROST|FREEZE|FREEZING|GLAZE|HAIL|SLEET|FREEZING RAIN|WINTER STORM", EventType) ~ "Snow / Ice",
+                grepl("SURF|CURRENT|TIDE|TIDAL FLOOD|COASTAL|FLOOD", EventType) ~ "Surf / Tide",
+                grepl("EARETHQUAKE|TSUNAMI", EventType) ~ "Earthquake / Tsunami",
+                grepl("AVALANCHE|AVALANCE", EventType) ~ "Avalanche",
+                grepl("WIND|MICROBURST", EventType) ~ "High Winds",
+                ## lower priority classifications
+                grepl("EROSION|EROSIN|SLIDE|SLUMP", EventType) ~ "Erosion / Landslide",
+                grepl("FOG", EventType) ~ "Fog",
+                grepl("DAM", EventType) ~ "Dam Failure",
+                grepl("VOLCANO|VOLCANIC", EventType) ~ "Volcano",
+                is.na(EventType) ~ NA_character_,
+                TRUE ~ "<other>"
+                )
+        )
+
+## assess which years to utilize for the analysis
+stormDates <- data.frame(EventStart=stormData$EventStart)
+stormDates <-stormDates %>% 
+        group_by(year=floor_date(EventStart, "year")) %>%
+        summarize(counts=n())
+plot(stormDates)
+
+## looking at the plot, e see what appears to be an exponential curve but with significant
+## jump above 30k events per year starting in the late 1990's -- specifically: 1996
+## specifically:
+stormDates %>% 
+        filter(counts>=30000) %>%
+        head(n=1)
+##  <dttm>               <int>
+##  1 1996-01-01 00:00:00  32270
+
+## and filter stormData
+targetStormData <- stormData %>% filter(EventStart >= as_date("1996-01-01 00:00:00"))
+
+## summarize health impact
+healthImpact <- targetStormData %>% 
+        select(EventType, Injuries, Fatalities, FatalitiesAndInjuries) %>%
+        group_by(EventType) %>% 
+        summarise(
+                TotalInjuries = sum(Injuries, na.rm = TRUE), 
+                TotalFatalities = sum(Fatalities, na.rm = TRUE),
+                TotalFatalitiesAndInjuries = TotalInjuries + TotalFatalities
+        ) %>%
+        arrange(desc(TotalFatalitiesAndInjuries)) %>%
+        head(10) ## %>% print()
+
+healthImpact %>%
+        ## for sorting the bars, convert eventType to factors
+        mutate(EventType = factor(EventType, levels = EventType[order(-TotalFatalitiesAndInjuries)])) %>%
+        ## reshape data to long form for plotting
+        gather(Type, HealthImpact, TotalInjuries:TotalFatalities) %>%
+        ## and plot
+        ggplot(aes(fill=Type, y=HealthImpact, x=EventType)) + 
+        geom_bar( stat="identity") + 
+        scale_fill_brewer(palette="Set1", 0.3) + 
+        labs(y = "Health Impact (injuries & fatalities)") +
+        theme(axis.text.x=element_text(angle=90, hjust=0.95, vjust = 0.2),
+              axis.title.x = element_blank(),
+        )
+
+## summarize economic impact
+economicImpact <- targetStormData %>% 
+        select(EventType, PropertyDamage, CropDamage, PropertyAndCropDamage) %>%
+        group_by(EventType) %>% 
+        summarise(
+                TotalPropertyDamage = sum(PropertyDamage, na.rm = TRUE)/10^9, 
+                TotalCropDamage = sum(CropDamage, na.rm = TRUE)/10^9,
+                TotalPropertyAndCropDamage = TotalPropertyDamage + TotalCropDamage
+                ) %>%
+        arrange(desc(TotalPropertyAndCropDamage)) %>%
+        head(10) ## %>% print()
+
+economicImpact %>%
+        ## for sorting the bars, convert eventType to factors
+        mutate(EventType = factor(EventType, levels = EventType[order(-TotalPropertyAndCropDamage)])) %>%
+        ## reshape data to long form for plotting
+        gather(Type, Damage, TotalPropertyDamage:TotalCropDamage) %>%
+        ## and plot
+        ggplot(aes(fill=Type, y=Damage, x=EventType)) + 
+        geom_bar( stat="identity") + 
+        scale_fill_brewer(palette="Set1") + 
+        labs(y = "Economic Impact (in billions)") +
+        theme(axis.text.x=element_text(angle=90, hjust=0.95, vjust = 0.2),
+              axis.title.x = element_blank(),
+              )
+
+
+
+## ****************************************************************
+## SCRATCHSPACE
+## ****************************************************************
 stormData <- stormData %>% 
         rename(LONGITUDE_E = LONGITUDE_) %>%
         ## delete the dangling  "0:00:00" from beginning date 
         separate(BGN_DATE, c("BGN_DATE", NA), sep="[ ]") %>%
+        ## random cleanup
         
         mutate(
+                ## convert various parameters to upper case (and remap exponent codes)
                 TIME_ZONE = toupper(TIME_ZONE),
+                EVTYPE = toupper(EVTYPE),
+                PROPDMGEXP = toupper(PROPDMGEXP),
+                CROPDMGEXP = toupper(CROPDMGEXP),
+                
                 ## combine lattitude/longitude
                 LatLong = if_else( 
                         is.na(LATITUDE) | is.na(LONGITUDE), 
@@ -97,17 +266,8 @@ stormData <- stormData %>%
                 TIME_ZONE = replace(TIME_ZONE, TIME_ZONE == "UTC", "GMT"),
                 TIME_ZONE = replace(TIME_ZONE, TIME_ZONE == "ESY", "EST"),
                 TIME_ZONE = replace(TIME_ZONE, TIME_ZONE == "CSC", "CST"),
-                TIME_ZONE = replace(TIME_ZONE, TIME_ZONE == "SCT", "CST"),
-                
-                ## combine date/time
-                BgnDateTime = paste(BGN_DATE, BGN_TIME),
+                TIME_ZONE = replace(TIME_ZONE, TIME_ZONE == "SCT", "CST")
         )
-
-
-allStates <- stormData %>% 
-        select(STATE) %>%
-        arrange(STATE) %>%
-        unique()
 
 ## not in TZ list
 ## 
@@ -124,9 +284,23 @@ stormData %>%
 ## 1879  3250  437   5337  274   1526  654   1347  70    262   1     28    23    1     3015  96    7     1     2
 
 oddStateTZ <- stormData %>% 
-        select(STATE, TIME_ZONE, WFO, LATITUDE) %>%
+        select(STATE, TIME_ZONE, WFO) %>%
         filter(STATE %in% oddSTATE) %>%
         group_by(STATE, TIME_ZONE) %>%
+        summarise(
+                count = n()
+        )
+
+ollStateTZ <- stormData %>% 
+        select(STATE, TIME_ZONE, WFO) %>%
+        group_by(STATE, TIME_ZONE, WFO) %>%
+        summarise(
+                count = n()
+        )
+
+ollStateTZ <- stormData %>% 
+        select(STATE, TIME_ZONE, WFO) %>%
+        group_by(STATE, WFO, TIME_ZONE) %>%
         summarise(
                 count = n()
         )
@@ -165,6 +339,10 @@ stormData %>%
         group_by(TIME_ZONE) %>%
         count(n=n())
 
+eventTypesAll <- stormData %>% 
+        select(EVTYPE) %>%
+        group_by(EVTYPE) %>%
+        count(n=n())
 
 ## Timezones file compiled from: 
 ## list of timezones in the US:
@@ -261,23 +439,10 @@ stormData %>%
         summarise(
                 count = n()
         )
-
 ## 
+## 4/18/1950 0130
 
-
-
-ggplot(data = stormData_raw, aes(BGN_DATE)) +
-        geom_histogram(binwidth = 365, color = "dark grey", fill = "blue", alpha=I(.2) ) +
-        labs(title = "Number of Storm Events by Year", x="year", y="# of events")
-
-expTable <- data.frame(c("H","K","M","B"))
-expTable <- cbind(expTable, c(10^2,10^3,10^6,10^9))
-colnames(expTable) <- c("input", "value")
-print(expTable)
-str(expTable)
-
-testOut <- testIn %>%
-        mutate(val  = ifelse(is.na(value), testTable[input,]$value, value))
+summary(unique(stormData$EVTYPE))
 
 
 ## *** RESULTS ***
