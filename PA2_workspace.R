@@ -9,6 +9,7 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 library(RColorBrewer)
+library(xtable)
 ##library(purrr)
 
 ## *** TITLE ***
@@ -228,7 +229,6 @@ economicImpact %>%
         theme(axis.text.x=element_text(angle=90, hjust=0.95, vjust = 0.2),
               axis.title.x = element_blank(),
               )
-
 
 
 ## ****************************************************************
